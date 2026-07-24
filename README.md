@@ -41,6 +41,10 @@ The standard `from_str` implementation in `num_rational` only supports the `nume
 
 Unlike parsing to a floating-point number (like `f64`) and then converting to a fraction, `num-rational-parse` parses decimal strings directly into their exact rational representation. This avoids precision loss or rounding errors commonly associated with floating-point math.
 
+### `no_std` Compatibility
+
+Unlike `num_rational` (which is `#![no_std]`-compatible), this crate **requires `std`**. This is because it depends on the [`regex`](https://crates.io/crates/regex) crate for parsing, which needs the standard library.
+
 ## License
 
 Licensed under either of

@@ -22,7 +22,7 @@
 
 use num_integer::Integer;
 use num_rational::Ratio;
-use num_traits::{CheckedAdd, CheckedMul, FromPrimitive, Signed};
+use num_traits::{CheckedAdd, CheckedMul, CheckedSub, FromPrimitive, Signed};
 use regex::Regex;
 use std::str::FromStr;
 
@@ -137,7 +137,7 @@ static RATIONAL_FORMAT: LazyLock<Regex> = LazyLock::new(|| {
 
 impl<T> RationalParse for Ratio<T>
 where
-    T: Clone + Integer + Signed + FromStr + CheckedMul + CheckedAdd + FromPrimitive,
+    T: Clone + Integer + Signed + FromStr + CheckedMul + CheckedAdd + CheckedSub + FromPrimitive,
     <T as FromStr>::Err: std::fmt::Display,
 {
     fn from_str_flex(input: &str) -> Result<Self, ParseRatioError> {
@@ -161,20 +161,32 @@ where
             });
         }
 
-        let parse_val = |s: &str| -> Result<T, ParseRatioError> {
+        let parse_val = |s: &str, sign: &str| -> Result<T, ParseRatioError> {
             if s.is_empty() {
-                return Ok(T::zero());
-            }
-            if s.contains('_') {
-                let s_clean = s.replace('_', "");
-                T::from_str(&s_clean).map_err(|_| ParseRatioError {
+                return match sign {
+                    "-" => T::zero().checked_sub(&T::zero()),
+                    _ => Some(T::zero()),
+                }
+                .ok_or(ParseRatioError {
                     kind: RatioErrorKind::Overflow,
-                })
+                });
+            }
+            let s_clean;
+            let s_effective = if s.contains('_') {
+                s_clean = s.replace('_', "");
+                &s_clean
             } else {
-                T::from_str(s).map_err(|_| ParseRatioError {
-                    kind: RatioErrorKind::Overflow,
-                })
+                s
+            };
+            if sign == "-" {
+                let signed = format!("-{}", s_effective);
+                T::from_str(&signed)
+            } else {
+                T::from_str(s_effective)
             }
+            .map_err(|_| ParseRatioError {
+                kind: RatioErrorKind::Overflow,
+            })
         };
 
         let ten = T::from_u8(10).ok_or(ParseRatioError {
@@ -187,35 +199,46 @@ where
             })
         };
 
-        let mut numerator: T = parse_val(num_str)?;
+        let mut numerator: T = parse_val(num_str, sign_str)?;
         let mut denominator: T;
 
         if let Some(d_str) = denom_str {
-            denominator = parse_val(d_str)?;
+            denominator = parse_val(d_str, "")?;
         } else {
             denominator = T::one();
             if let Some(dec) = decimal_str {
-                // Strip trailing zeros to avoid unnecessary overflow and create more efficient rationals
-                // e.g., "1.0000000000" becomes "1.0" instead of creating denominator = 10^10
-                let dec_trimmed = dec.trim_end_matches('0');
+                // Strip underscores first, then strip trailing zeros to avoid
+                // unnecessary overflow and create more efficient rationals.
+                // e.g., "1.0000000000" becomes "1.0" instead of creating denominator = 10^10,
+                // and "1.0_0_0_0" correctly strips to "1.0" as well.
                 let dec_clean_owned: String;
-                let dec_final = if dec_trimmed.contains('_') {
-                    dec_clean_owned = dec_trimmed.replace('_', "");
+                let dec_no_underscores = if dec.contains('_') {
+                    dec_clean_owned = dec.replace('_', "");
                     &dec_clean_owned
                 } else {
-                    dec_trimmed
+                    dec
                 };
+                let dec_trimmed = dec_no_underscores.trim_end_matches('0');
 
                 // Power of 10 equal to number of significant decimal digits
-                let scale = checked_pow(&ten, dec_final.len() as u32)?;
+                let scale = checked_pow(&ten, dec_trimmed.len() as u32)?;
 
-                let dec_val = if dec_final.is_empty() {
+                let mut dec_val = if dec_trimmed.is_empty() {
                     T::zero()
                 } else {
-                    T::from_str(dec_final).map_err(|_| ParseRatioError {
+                    T::from_str(dec_trimmed).map_err(|_| ParseRatioError {
                         kind: RatioErrorKind::Overflow,
                     })?
                 };
+
+                // If the overall sign is negative, the decimal part also contributes
+                // negatively. This must be applied before the multiplication by scale
+                // so that the sign applies to the entire magnitude correctly.
+                if sign_str == "-" {
+                    dec_val = T::zero().checked_sub(&dec_val).ok_or(ParseRatioError {
+                        kind: RatioErrorKind::Overflow,
+                    })?;
+                }
 
                 numerator = numerator
                     .checked_mul(&scale)
@@ -256,10 +279,6 @@ where
                     })?;
                 }
             }
-        }
-
-        if sign_str == "-" {
-            numerator = -numerator;
         }
 
         if denominator.is_zero() {

@@ -50,6 +50,7 @@ fn test_fractions() {
     assert_eq!((-3, 2), components("-3/2  "));
     assert_eq!((13, 2), components("    0013/002 \n  "));
     assert_eq!((41, 107), components("1_2_3/3_2_1"));
+    assert_eq!((3, 2), components("+3/2"));
 }
 
 #[test]
@@ -85,11 +86,11 @@ fn test_overflow() {
     // Integer overflow: exceeds i32::MAX (2147483647)
     check_invalid("2147483648", RatioErrorKind::Overflow);
     check_invalid("99999999999", RatioErrorKind::Overflow);
-    check_invalid("-2147483648", RatioErrorKind::Overflow);
+    check_invalid("-2147483649", RatioErrorKind::Overflow);
 
     // Fraction overflow: numerator exceeds i32::MAX
     check_invalid("2147483648/1", RatioErrorKind::Overflow);
-    check_invalid("-2147483648/1", RatioErrorKind::Overflow);
+    check_invalid("-2147483649/1", RatioErrorKind::Overflow);
 
     // Fraction overflow: denominator exceeds i32::MAX
     check_invalid("1/2147483648", RatioErrorKind::Overflow);
@@ -97,6 +98,28 @@ fn test_overflow() {
     // Trailing zeros are stripped to prevent unnecessary overflow
     assert_eq!((1, 1), components("1.0000000000"));
     assert_eq!((123, 100), components("1.2300000"));
+
+    // Creative trailing-zero formatting that would overflow without stripping.
+    // Using i8 (Rational8) since it overflows at scale 10^3 (1000 > 127).
+    // Each of these has enough zeros that the un-stripped scale would overflow.
+    type R8 = Ratio<i8>;
+    assert_eq!(R8::from_str_flex("1.0_0_0").unwrap(), R8::new(1, 1));
+    assert_eq!(R8::from_str_flex("1.000_000").unwrap(), R8::new(1, 1));
+    assert_eq!(R8::from_str_flex("-1.0_000_000").unwrap(), R8::new(-1, 1));
+    assert_eq!(R8::from_str_flex("0.000_0_0_0_0_0").unwrap(), R8::new(0, 1));
+    assert_eq!(R8::from_str_flex("1.00_00_00_00").unwrap(), R8::new(1, 1));
+    assert_eq!(R8::from_str_flex(".000_000_000").unwrap(), R8::new(0, 1));
+    assert_eq!(R8::from_str_flex("12.00_0_000").unwrap(), R8::new(12, 1));
+
+    // Mixed: significant digits followed by creatively formatted trailing zeros
+    assert_eq!(R8::from_str_flex("3.20_0_0_0_0").unwrap(), R8::new(16, 5));
+    assert_eq!(R8::from_str_flex("-5.10_00_00").unwrap(), R8::new(-51, 10));
+
+    // Scientific notation: trailing zeros in significand, exponent provides
+    // the actual scale - zeros must be stripped before the exponent is applied
+    assert_eq!(components("1.000_000e2"), (100, 1));
+    assert_eq!(components("-2.0_0_0_0e3"), (-2000, 1));
+    assert_eq!(components("3.00_0_0e-2"), (3, 100));
 
     // But actual overflow with significant digits still caught
     check_invalid("1.12345678901", RatioErrorKind::Overflow);
@@ -108,6 +131,56 @@ fn test_overflow() {
     // Scientific notation overflow: negative exponent causing denominator overflow
     check_invalid("3.14_15e-1_0", RatioErrorKind::Overflow);
     check_invalid("1e-10", RatioErrorKind::Overflow);
+
+    // --- MIN / MAX boundary tests for various integer widths ---
+
+    // i8::MAX = 127
+    assert_eq!(R8::from_str_flex("127").unwrap(), R8::new(127, 1));
+    assert_eq!(
+        R8::from_str_flex(&i8::MAX.to_string()).unwrap(),
+        R8::new(i8::MAX, 1)
+    );
+    assert_eq!(
+        R8::from_str_flex(&format!("{}/1", i8::MAX)).unwrap(),
+        R8::new(i8::MAX, 1)
+    );
+    // i8::MAX + 1 overflows
+    assert_eq!(
+        *R8::from_str_flex("128").unwrap_err().kind(),
+        RatioErrorKind::Overflow
+    );
+
+    // i8::MIN should parse correctly (the magnitude 128 does not fit in i8,
+    // but the signed value -128 must be parsed directly)
+    assert_eq!(R8::from_str_flex("-128").unwrap(), R8::new(-128, 1));
+    assert_eq!(R8::from_str_flex("-128/1").unwrap(), R8::new(-128, 1));
+    assert_eq!(
+        R8::from_str_flex(&i8::MIN.to_string()).unwrap(),
+        R8::new(i8::MIN, 1)
+    );
+    assert_eq!(
+        R8::from_str_flex(&format!("{}/1", i8::MIN)).unwrap(),
+        R8::new(i8::MIN, 1)
+    );
+
+    // i128::MAX and i128::MIN
+    type R128 = Ratio<i128>;
+    assert_eq!(
+        R128::from_str_flex(&i128::MAX.to_string()).unwrap(),
+        R128::new(i128::MAX, 1)
+    );
+    assert_eq!(
+        R128::from_str_flex(&format!("{}/1", i128::MAX)).unwrap(),
+        R128::new(i128::MAX, 1)
+    );
+    assert_eq!(
+        R128::from_str_flex(&i128::MIN.to_string()).unwrap(),
+        R128::new(i128::MIN, 1)
+    );
+    assert_eq!(
+        R128::from_str_flex(&format!("{}/1", i128::MIN)).unwrap(),
+        R128::new(i128::MIN, 1)
+    );
 }
 
 #[test]
@@ -169,6 +242,15 @@ fn test_invalid() {
     check_invalid("1/123_dd", RatioErrorKind::ParseError);
     check_invalid("789edd", RatioErrorKind::ParseError);
     check_invalid("789e2_dd", RatioErrorKind::ParseError);
+
+    // Trailing 'e'/'E' without exponent digits should be rejected
+    check_invalid("3.2e", RatioErrorKind::ParseError);
+    check_invalid("3.2E", RatioErrorKind::ParseError);
+    check_invalid(".5e", RatioErrorKind::ParseError);
+    check_invalid("1.e", RatioErrorKind::ParseError);
+    check_invalid("0e", RatioErrorKind::ParseError);
+    check_invalid("-0e", RatioErrorKind::ParseError);
+    check_invalid("1e", RatioErrorKind::ParseError);
 }
 
 #[test]
@@ -196,10 +278,6 @@ fn test_aliases() {
 
     // Test Ratio<i8>
     type Rational8 = Ratio<i8>;
-    assert_eq!(
-        *Rational8::from_str_flex("128").unwrap_err().kind(),
-        RatioErrorKind::Overflow
-    );
     assert_eq!(
         Rational8::from_str_flex("127").unwrap(),
         Rational8::new(127, 1)

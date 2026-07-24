@@ -1,6 +1,6 @@
 [package]
 name = "num-rational-parse"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.80"
 description = "A flexible string parsing extension for num_rational::Ratio, supporting fractions, decimals, and scientific notation (inspired by Python's fractions module)."
@@ -21,6 +21,7 @@ regex = "1.12"
 
 [dev-dependencies]
 criterion = "0.5.1"
+pyo3 = { version = "0.23", features = ["auto-initialize"] }
 
 [[bench]]
 name = "parse"
