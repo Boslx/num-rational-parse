@@ -14,12 +14,9 @@ fn check_invalid(s: &str, expected: RatioErrorKind) {
             expected, s, val
         ),
         Err(e) => assert_eq!(
-            *e.kind(),
-            expected,
+            e.kind, expected,
             "For input {:?}, expected error {:?}, got {:?}",
-            s,
-            expected,
-            e.kind()
+            s, expected, e.kind
         ),
     }
 }
@@ -33,6 +30,20 @@ fn test_examples() {
     assert_eq!((9, 4), components("2.25"));
     assert_eq!((1000, 1), components("1_000/1"));
     assert_eq!((3, 2), components("1.50_0"));
+
+    // Doc examples from lib.rs (table + code block)
+    assert_eq!((42, 1), components("42"));
+    assert_eq!((-5, 1), components("-5"));
+    assert_eq!((3, 4), components("3/4"));
+    assert_eq!((-5, 2), components("-5/2"));
+    assert_eq!((5, 4), components("1.25"));
+    assert_eq!((1, 2), components(".5"));
+    assert_eq!((3, 2500), components("1.2e-3"));
+    assert_eq!((100000, 1), components("1E5"));
+    assert_eq!((1, 2), components("1_000/2_000"));
+    assert_eq!((157, 50), components("3.14"));
+    assert_eq!((3, 250), components("1.2e-2"));
+    assert_eq!((-1, 2), components("-1_000/2_000"));
 }
 
 #[test]
@@ -146,7 +157,7 @@ fn test_overflow() {
     );
     // i8::MAX + 1 overflows
     assert_eq!(
-        *R8::from_str_flex("128").unwrap_err().kind(),
+        R8::from_str_flex("128").unwrap_err().kind,
         RatioErrorKind::Overflow
     );
 

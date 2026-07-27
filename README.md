@@ -17,7 +17,7 @@ Add this to your `Cargo.toml`:
 ```toml
 [dependencies]
 num-rational = "0.4"
-num-rational-parse = "0.1"
+num-rational-parse = "0.2"
 ```
 
 Then import the `RationalParse` trait:

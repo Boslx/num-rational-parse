@@ -1,292 +1,237 @@
-//! Flexible string parsing for `num_rational`.
+//! Flexible string parsing for [`num_rational::Ratio`].
 //!
-//! This crate provides flexible string parsing for rational numbers, inspired by
-//! Python's `fractions` module, allowing `num_rational::Ratio` to be parsed from
-//! strings with flexible formatting.
+//! This crate extends [`Ratio`] with a parser that accepts the same formats as
+//! Python's `fractions.Fraction`:
+//!
+//! | Format                  | Example           |
+//! |-------------------------|-------------------|
+//! | Integer                 | `"42"`, `"-5"`    |
+//! | Fraction                | `"3/4"`, `"-5/2"` |
+//! | Decimal                 | `"1.25"`, `".5"`  |
+//! | Scientific notation     | `"1.2e-3"`, `"1E5"` |
+//!
+//! Underscores are allowed as digit separators in all formats:
+//! `"1_000/2_000"`, `"3.14_15e-1_0"`.
 //!
 //! # Examples
 //!
-//! ```rust
+//! ```
 //! use num_rational::Ratio;
 //! use num_rational_parse::RationalParse;
 //!
-//! let r = Ratio::<i32>::from_str_flex("3.14").unwrap();
-//! assert_eq!(r, Ratio::new(157, 50));
-//!
-//! let r2 = Ratio::<i32>::from_str_flex("1.2e-2").unwrap();
-//! assert_eq!(r2, Ratio::new(3, 250));
-//!
-//! let r3 = Ratio::<i32>::from_str_flex("-1_000/2_000").unwrap();
-//! assert_eq!(r3, Ratio::new(-1, 2));
+//! assert_eq!(Ratio::<i32>::from_str_flex("3.14").unwrap(), Ratio::new(157, 50));
+//! assert_eq!(Ratio::<i32>::from_str_flex("1.2e-2").unwrap(), Ratio::new(3, 250));
+//! assert_eq!(Ratio::<i32>::from_str_flex("-1_000/2_000").unwrap(), Ratio::new(-1, 2));
 //! ```
 
 use num_integer::Integer;
 use num_rational::Ratio;
-use num_traits::{CheckedAdd, CheckedMul, CheckedSub, FromPrimitive, Signed};
-use regex::Regex;
+use num_traits::{CheckedAdd, CheckedMul, CheckedSub, FromPrimitive, One, Signed, Zero};
+use regex::{regex, Regex};
 use std::str::FromStr;
 
-/// An error which can be returned when parsing a ratio.
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{kind}")]
 pub struct ParseRatioError {
-    kind: RatioErrorKind,
+    pub kind: RatioErrorKind,
 }
 
-impl ParseRatioError {
-    /// Returns the specific type of error that occurred.
-    pub fn kind(&self) -> &RatioErrorKind {
-        &self.kind
-    }
-}
-
-impl std::fmt::Display for ParseRatioError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.kind.description().fmt(f)
-    }
-}
-
-/// The specific type of error that occurred during parsing.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+/// The specific category of a [`ParseRatioError`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
 pub enum RatioErrorKind {
-    /// The string could not be parsed as a ratio.
-    ///
-    /// This occurs if the input string does not match the expected format
-    /// (e.g., contains invalid characters or is empty).
+    #[error("Input does not match a valid rational-number format")]
     ParseError,
-    /// The denominator was zero.
-    ///
-    /// Ratios cannot have a zero denominator.
+    #[error("The denominator is zero")]
     ZeroDenominator,
-    /// The parsed value cannot be represented by the target type.
-    ///
-    /// This occurs if the numerator, denominator, or intermediate values
-    /// overflow the capacity of the integer type `T`.
+    #[error("Value overflowed the target integer type")]
     Overflow,
 }
 
-impl RatioErrorKind {
-    fn description(&self) -> &'static str {
-        match *self {
-            RatioErrorKind::ParseError => "failed to parse integer",
-            RatioErrorKind::ZeroDenominator => "zero value denominator",
-            RatioErrorKind::Overflow => "overflow",
-        }
-    }
+// ---------------------------------------------------------------------------
+// Regex
+//
+// Adapted from CPython's fractions.py. The Python original uses a lookahead
+// `(?=\d|\.\d)` that the `regex` crate does not support; we validate the
+// equivalent constraint in code instead.
+//
+// Reference: https://github.com/python/cpython/blob/888d101/Lib/fractions.py#L56
+// ---------------------------------------------------------------------------
+
+fn rational_re() -> &'static Regex {
+    regex!(
+        r"(?xi)
+        \A\s*
+        (?P<sign>[-+]?)                     # optional sign
+        (?P<num>\d*|\d+(_\d+)*)             # numerator / integer part (may be empty)
+        (?:
+            (?:\s*/\s*(?P<denom>\d+(_\d+)*))?  # optional denominator
+        |
+            (?:\.(?P<decimal>\d*|\d+(_\d+)*))?  # optional decimal part
+            (?:E(?P<exp>[-+]?\d+(_\d+)*))?      # optional exponent
+        )
+        \s*\z
+        "
+    )
 }
 
-impl std::fmt::Display for RatioErrorKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.description().fmt(f)
-    }
-}
-
-/// A trait for parsing a string into a rational number with flexible formats.
-///
-/// This trait extends `num_rational::Ratio` to support parsing strings in formats
-/// accepted by Python's `fractions.Fraction` class, including:
-/// - Fractions: `"1/2"`
-/// - Decimals: `"1.5"`
-/// - Scientific notation: `"1.2e-3"`, `"1E5"`
+/// Extension trait that adds flexible rational-number parsing to [`Ratio`].
 pub trait RationalParse: Sized {
-    /// Parses a string into a rational number.
+    /// Parse a string into a rational number.
     ///
-    /// The input string can be in various formats:
-    /// - `"-35/4"` (Fraction)
-    /// - `"3.1415"` (Decimal)
-    /// - `"-47e-2"` (Scientific notation)
+    /// Accepts integers, fractions (`a/b`), decimals (`a.b`), and
+    /// scientific notation (`a.bEe`). Underscores are permitted as digit
+    /// separators in all numeric parts.
     ///
     /// # Errors
     ///
-    /// Returns [`ParseRatioError`] if the string is not a valid rational number string
-    /// or if it represents a valid number that cannot be represented by the target type
-    /// (e.g. overflow).
+    /// Returns [`ParseRatioError`] if the input is malformed, contains a zero
+    /// denominator, or causes integer overflow for the chosen type `T`.
     fn from_str_flex(s: &str) -> Result<Self, ParseRatioError>;
 }
-
-use std::sync::LazyLock;
-
-/// Returns the regular expression for parsing rational numbers.
-///
-/// This regex is adapted from Python's `fractions` module, with additional capture
-/// groups and detailed comments for clarity.
-///
-/// Note: The lookahead `(?=\d|\.\d)` present in the Python reference is omitted here
-/// as it is not supported by the `regex` crate; the check is performed manually
-/// in the parsing logic.
-///
-/// Python reference:
-/// https://github.com/python/cpython/blob/888d101445c72c7cf23923e99ed567732f42fb79/Lib/fractions.py#L56
-static RATIONAL_FORMAT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?xi)                                # Case-insensitive, verbose mode
-        \A\s*                                  # optional whitespace at the start,
-        (?P<sign>[-+]?)                        # an optional sign, then
-        (?P<num>\d*|\d+(_\d+)*)                # numerator (possibly empty)
-        (?:                                    # followed by
-           (?:\s*/\s*(?P<denom>\d+(_\d+)*))?   # an optional denominator
-        |                                      # or
-           (?:\.(?P<decimal>\d*|\d+(_\d+)*))?  # an optional fractional part
-           (?:E(?P<exp>[-+]?\d+(_\d+)*))?      # and optional exponent
-        )
-        \s*\z                                  # and optional whitespace to finish
-        ",
-    )
-    .unwrap()
-});
 
 impl<T> RationalParse for Ratio<T>
 where
     T: Clone + Integer + Signed + FromStr + CheckedMul + CheckedAdd + CheckedSub + FromPrimitive,
-    <T as FromStr>::Err: std::fmt::Display,
 {
     fn from_str_flex(input: &str) -> Result<Self, ParseRatioError> {
-        let cap = RATIONAL_FORMAT.captures(input).ok_or(ParseRatioError {
-            kind: RatioErrorKind::ParseError,
-        })?;
+        let caps = rational_re()
+            .captures(input)
+            .ok_or(parse_error(RatioErrorKind::ParseError))?;
 
-        let sign_str = cap.name("sign").map(|m| m.as_str()).unwrap_or("");
-        let num_str = cap.name("num").map(|m| m.as_str()).unwrap_or("");
-        let denom_str = cap.name("denom").map(|m| m.as_str());
-        let decimal_str = cap.name("decimal").map(|m| m.as_str());
-        let exp_str = cap.name("exp").map(|m| m.as_str());
+        let sign_negative = caps.name("sign").is_some_and(|m| m.as_str() == "-");
+        let num_str = caps.name("num").map_or("", |m| m.as_str());
+        let denom = caps.name("denom").map(|m| m.as_str());
+        let decimal = caps.name("decimal").map(|m| m.as_str());
+        let exp = caps.name("exp").map(|m| m.as_str());
 
-        // Validate "lookahead" equivalent
-        let num_has_digits = !num_str.is_empty();
-        let decimal_has_digits = decimal_str.is_some_and(|s| !s.is_empty());
-
-        if !num_has_digits && !decimal_has_digits {
-            return Err(ParseRatioError {
-                kind: RatioErrorKind::ParseError,
-            });
+        // Must have at least one digit somewhere.
+        if num_str.is_empty() && !decimal.is_some_and(|s| !s.is_empty()) {
+            return Err(parse_error(RatioErrorKind::ParseError));
         }
 
-        let parse_val = |s: &str, sign: &str| -> Result<T, ParseRatioError> {
-            if s.is_empty() {
-                return match sign {
-                    "-" => T::zero().checked_sub(&T::zero()),
-                    _ => Some(T::zero()),
-                }
-                .ok_or(ParseRatioError {
-                    kind: RatioErrorKind::Overflow,
-                });
+        let mut numerator = parse_int(num_str, sign_negative)?;
+
+        // Fraction: "a / b"
+        if let Some(d) = denom {
+            let denominator: T = parse_int(d, false)?;
+            if denominator.is_zero() {
+                return Err(parse_error(RatioErrorKind::ZeroDenominator));
             }
-            let s_clean;
-            let s_effective = if s.contains('_') {
-                s_clean = s.replace('_', "");
-                &s_clean
+            return Ok(Ratio::new(numerator, denominator));
+        }
+
+        // Pure integer (no decimal point, no exponent).
+        if decimal.is_none() && exp.is_none() {
+            return Ok(Ratio::from_integer(numerator));
+        }
+
+        // Decimal / scientific notation.
+        let mut denominator = T::one();
+
+        if let Some(dec) = decimal {
+            let dec_clean = dec.replace('_', "");
+            let dec_trimmed = dec_clean.trim_end_matches('0');
+            let scale = pow10(
+                u32::try_from(dec_trimmed.len())
+                    .map_err(|_| parse_error(RatioErrorKind::Overflow))?,
+            )?;
+
+            let dec_val = if dec_trimmed.is_empty() {
+                T::zero()
             } else {
-                s
+                parse_int(dec_trimmed, sign_negative)?
             };
-            if sign == "-" {
-                let signed = format!("-{}", s_effective);
-                T::from_str(&signed)
-            } else {
-                T::from_str(s_effective)
-            }
-            .map_err(|_| ParseRatioError {
-                kind: RatioErrorKind::Overflow,
-            })
-        };
 
-        let ten = T::from_u8(10).ok_or(ParseRatioError {
-            kind: RatioErrorKind::ParseError,
-        })?;
+            numerator = numerator
+                .checked_mul(&scale)
+                .and_then(|n| n.checked_add(&dec_val))
+                .ok_or_else(|| parse_error(RatioErrorKind::Overflow))?;
 
-        let checked_pow = |base: &T, exp: u32| -> Result<T, ParseRatioError> {
-            num_traits::checked_pow(base.clone(), exp as usize).ok_or(ParseRatioError {
-                kind: RatioErrorKind::Overflow,
-            })
-        };
+            denominator = denominator
+                .checked_mul(&scale)
+                .ok_or_else(|| parse_error(RatioErrorKind::Overflow))?;
+        }
 
-        let mut numerator: T = parse_val(num_str, sign_str)?;
-        let mut denominator: T;
+        if let Some(exp_str) = exp {
+            let exp_val = exp_str
+                .replace('_', "")
+                .parse::<i32>()
+                .map_err(|_| parse_error(RatioErrorKind::ParseError))?;
 
-        if let Some(d_str) = denom_str {
-            denominator = parse_val(d_str, "")?;
-        } else {
-            denominator = T::one();
-            if let Some(dec) = decimal_str {
-                // Strip underscores first, then strip trailing zeros to avoid
-                // unnecessary overflow and create more efficient rationals.
-                // e.g., "1.0000000000" becomes "1.0" instead of creating denominator = 10^10,
-                // and "1.0_0_0_0" correctly strips to "1.0" as well.
-                let dec_clean_owned: String;
-                let dec_no_underscores = if dec.contains('_') {
-                    dec_clean_owned = dec.replace('_', "");
-                    &dec_clean_owned
-                } else {
-                    dec
-                };
-                let dec_trimmed = dec_no_underscores.trim_end_matches('0');
-
-                // Power of 10 equal to number of significant decimal digits
-                let scale = checked_pow(&ten, dec_trimmed.len() as u32)?;
-
-                let mut dec_val = if dec_trimmed.is_empty() {
-                    T::zero()
-                } else {
-                    T::from_str(dec_trimmed).map_err(|_| ParseRatioError {
-                        kind: RatioErrorKind::Overflow,
-                    })?
-                };
-
-                // If the overall sign is negative, the decimal part also contributes
-                // negatively. This must be applied before the multiplication by scale
-                // so that the sign applies to the entire magnitude correctly.
-                if sign_str == "-" {
-                    dec_val = T::zero().checked_sub(&dec_val).ok_or(ParseRatioError {
-                        kind: RatioErrorKind::Overflow,
-                    })?;
-                }
-
+            let scale = pow10(exp_val.unsigned_abs())?;
+            if exp_val >= 0 {
                 numerator = numerator
                     .checked_mul(&scale)
-                    .ok_or(ParseRatioError {
-                        kind: RatioErrorKind::Overflow,
-                    })?
-                    .checked_add(&dec_val)
-                    .ok_or(ParseRatioError {
-                        kind: RatioErrorKind::Overflow,
-                    })?;
-
-                denominator = denominator.checked_mul(&scale).ok_or(ParseRatioError {
-                    kind: RatioErrorKind::Overflow,
-                })?;
+                    .ok_or_else(|| parse_error(RatioErrorKind::Overflow))?;
+            } else {
+                denominator = denominator
+                    .checked_mul(&scale)
+                    .ok_or_else(|| parse_error(RatioErrorKind::Overflow))?;
             }
-            if let Some(exp_s) = exp_str {
-                let exp_clean_owned: String;
-                let exp_final = if exp_s.contains('_') {
-                    exp_clean_owned = exp_s.replace('_', "");
-                    &exp_clean_owned
-                } else {
-                    exp_s
-                };
-                let exp_val = exp_final.parse::<i32>().map_err(|_| ParseRatioError {
-                    kind: RatioErrorKind::ParseError,
-                })?;
-
-                let abs_exp = exp_val.unsigned_abs();
-                let scale = checked_pow(&ten, abs_exp)?;
-
-                if exp_val >= 0 {
-                    numerator = numerator.checked_mul(&scale).ok_or(ParseRatioError {
-                        kind: RatioErrorKind::Overflow,
-                    })?;
-                } else {
-                    denominator = denominator.checked_mul(&scale).ok_or(ParseRatioError {
-                        kind: RatioErrorKind::Overflow,
-                    })?;
-                }
-            }
-        }
-
-        if denominator.is_zero() {
-            return Err(ParseRatioError {
-                kind: RatioErrorKind::ZeroDenominator,
-            });
         }
 
         Ok(Ratio::new(numerator, denominator))
     }
+}
+
+#[inline]
+fn parse_error(kind: RatioErrorKind) -> ParseRatioError {
+    ParseRatioError { kind }
+}
+
+#[inline]
+fn parse_int<T>(digits: &str, negative: bool) -> Result<T, ParseRatioError>
+where
+    T: FromStr + Zero,
+{
+    if digits.is_empty() {
+        return Ok(T::zero());
+    }
+    // Fast path: positive number without underscores — zero allocations.
+    if !negative && !digits.contains('_') {
+        return T::from_str(digits).map_err(|_| parse_error(RatioErrorKind::Overflow));
+    }
+    // Slow path: prepend sign and/or strip underscores in one pass.
+    let mut cleaned = String::with_capacity(digits.len() + 1);
+    if negative {
+        cleaned.push('-');
+    }
+    for c in digits.chars() {
+        if c != '_' {
+            cleaned.push(c);
+        }
+    }
+    if cleaned.is_empty() || cleaned == "-" {
+        return Ok(T::zero());
+    }
+    T::from_str(&cleaned).map_err(|_| parse_error(RatioErrorKind::Overflow))
+}
+
+#[inline]
+fn pow10<T>(exp: u32) -> Result<T, ParseRatioError>
+where
+    T: Clone + CheckedMul + One + FromPrimitive,
+{
+    let ten = T::from_u8(10).ok_or_else(|| parse_error(RatioErrorKind::ParseError))?;
+    if exp == 0 {
+        return Ok(T::one());
+    }
+    let mut result = T::one();
+    let mut base = ten;
+    let mut e = exp;
+    while e > 0 {
+        if e & 1 == 1 {
+            result = result
+                .checked_mul(&base)
+                .ok_or_else(|| parse_error(RatioErrorKind::Overflow))?;
+        }
+        e >>= 1;
+        if e > 0 {
+            base = base
+                .checked_mul(&base)
+                .ok_or_else(|| parse_error(RatioErrorKind::Overflow))?;
+        }
+    }
+    Ok(result)
 }

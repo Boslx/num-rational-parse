@@ -1,6 +1,6 @@
 [package]
 name = "num-rational-parse"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.80"
 description = "A flexible string parsing extension for num_rational::Ratio, supporting fractions, decimals, and scientific notation (inspired by Python's fractions module)."
@@ -17,7 +17,8 @@ include = [
 num-integer = "0.1"
 num-rational = "0.4"
 num-traits = "0.2"
-regex = "1.12"
+regex = "1.13"
+thiserror = "2"
 
 [dev-dependencies]
 criterion = "0.5.1"
