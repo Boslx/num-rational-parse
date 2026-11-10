@@ -1,24 +1,39 @@
 //! Integration test using Python's `fractions.Fraction` as a test oracle.
 //!
-//! This test verifies that `num-rational-parse` produces the same results as
-//! Python's `fractions.Fraction` for a wide variety of inputs — both valid
-//! (should parse successfully) and invalid (should both reject).
+//! This test verifies that `num-rational-parse` behaves like Python's
+//! `fractions.Fraction` for a wide variety of inputs: accepted inputs produce
+//! the same numerator/denominator, and rejected inputs produce the
+//! corresponding error kind (`ValueError` <-> `ParseError`,
+//! `ZeroDivisionError` <-> `ZeroDenominator`).
 
 use num_rational::Ratio;
-use num_rational_parse::RationalParse;
+use num_rational_parse::{RatioErrorKind, RationalParse};
+use pyo3::exceptions::{PyValueError, PyZeroDivisionError};
 use pyo3::types::PyAnyMethods;
 
-/// Try to parse `input` with Python's `fractions.Fraction`.
+/// Parse `input` with Python's `fractions.Fraction`.
 ///
-/// Returns `Some((numerator, denominator))` on success, or `None` if Python
-/// rejects the input (raises `ValueError` or `ZeroDivisionError`).
-fn python_fraction_opt(input: &str) -> Option<(i128, i128)> {
-    pyo3::Python::with_gil(|py| {
-        let fractions = py.import("fractions").ok()?;
-        let f = fractions.call_method1("Fraction", (input,)).ok()?;
-        let num: i128 = f.getattr("numerator").ok()?.extract().ok()?;
-        let den: i128 = f.getattr("denominator").ok()?.extract().ok()?;
-        Some((num, den))
+/// A rejection is mapped onto the equivalent error kind of this crate, so the
+/// tests can compare the two kinds directly.
+fn python_fraction(input: &str) -> Result<(i128, i128), RatioErrorKind> {
+    pyo3::Python::attach(|py| {
+        let fractions = py.import("fractions").expect("import fractions");
+        let f = match fractions.call_method1("Fraction", (input,)) {
+            Ok(f) => f,
+            Err(err) if err.is_instance_of::<PyZeroDivisionError>(py) => {
+                return Err(RatioErrorKind::ZeroDenominator)
+            }
+            Err(err) if err.is_instance_of::<PyValueError>(py) => {
+                return Err(RatioErrorKind::ParseError)
+            }
+            Err(err) => panic!("unexpected Python exception for {input:?}: {err:?}"),
+        };
+        let num = f.getattr("numerator").expect("numerator");
+        let den = f.getattr("denominator").expect("denominator");
+        Ok((
+            num.extract().expect("numerator fits i128"),
+            den.extract().expect("denominator fits i128"),
+        ))
     })
 }
 
@@ -82,6 +97,10 @@ fn test_valid_inputs_agree_with_python() {
         "-1.23e4",
         ".0e+0",
         "-0.000e0",
+        // Zero with an exponent too large for the scale to fit a small type
+        "0.0e10",
+        "0e-40",
+        "-0.0e-40",
         "1E5",
         ".5e2",
         "-.5e2",
@@ -120,37 +139,31 @@ fn test_valid_inputs_agree_with_python() {
     ];
 
     for &input in test_cases {
-        let py = python_fraction_opt(input)
-            .unwrap_or_else(|| panic!("Python Fraction({input:?}) rejected a valid input"));
-
-        let rust_ratio = Ratio::<i128>::from_str_flex(input)
-            .unwrap_or_else(|e| panic!("Rust from_str_flex failed for '{}': {:?}", input, e));
-        let rust_num = *rust_ratio.numer();
-        let rust_den = *rust_ratio.denom();
+        let python = python_fraction(input)
+            .unwrap_or_else(|kind| panic!("Python rejected valid input {input:?}: {kind}"));
+        let rust = Ratio::<i128>::from_str_flex(input)
+            .unwrap_or_else(|e| panic!("Rust rejected valid input {input:?}: {e}"));
+        let rust = (*rust.numer(), *rust.denom());
 
         assert_eq!(
-            (py.0, py.1),
-            (rust_num, rust_den),
-            "Mismatch for input '{}':\n  Python: {}/{}\n  Rust:   {}/{}",
-            input,
-            py.0,
-            py.1,
-            rust_num,
-            rust_den
+            python, rust,
+            "Mismatch for input {input:?}:\n  Python: {python:?}\n  Rust:   {rust:?}"
         );
     }
 }
 
 #[test]
-fn test_invalid_inputs_rejected_by_both() {
-    // Inputs that Python's Fraction rejects *and* from_str_flex should also reject.
-    // Both sides must agree these are unparseable.
+fn test_invalid_inputs_reject_with_equivalent_error() {
+    // Inputs that Python's Fraction rejects; `from_str_flex` must reject them
+    // with the corresponding error kind:
+    //   ValueError        <-> RatioErrorKind::ParseError
+    //   ZeroDivisionError <-> RatioErrorKind::ZeroDenominator
     let test_cases: &[&str] = &[
         // Garbage
         "", "   ", "invalid", "abc", "3a2", "a3", "3a", // Double signs
         "--3", "++3", "+-3", "-+3", // Just sign
         "+", "-", // Malformed fractions
-        "3/", "/2", "3/+2", "3/-2", "3/0", "1/0",
+        "3/", "/2", "3/+2", "3/-2", "3/0", "1/0", "0/0", "1/00",
         // Whitespace between sign and number
         "+ 3/2", "- 3/2", // Whitespace inside decimal
         "3 .2", "3. 2", // Whitespace around exponent
@@ -173,15 +186,22 @@ fn test_invalid_inputs_rejected_by_both() {
     ];
 
     for &input in test_cases {
-        let python_rejected = python_fraction_opt(input).is_none();
-        let rust_rejected = Ratio::<i128>::from_str_flex(input).is_err();
+        let python =
+            python_fraction(input).expect_err(&format!("Python accepted invalid input {input:?}"));
+        let rust = Ratio::<i128>::from_str_flex(input).map_or_else(
+            |e| e.kind,
+            |r| {
+                panic!(
+                    "Rust accepted invalid input {input:?} as {}/{}",
+                    r.numer(),
+                    r.denom()
+                )
+            },
+        );
 
-        assert!(
-            python_rejected && rust_rejected,
-            "Both should reject '{}', but:\n  Python rejects: {}\n  Rust rejects:  {}",
-            input,
-            python_rejected,
-            rust_rejected,
+        assert_eq!(
+            python, rust,
+            "Error kinds disagree for {input:?}: Python {python}, Rust {rust}"
         );
     }
 }

@@ -43,7 +43,11 @@ Unlike parsing to a floating-point number (like `f64`) and then converting to a 
 
 ### `no_std` Compatibility
 
-Unlike `num_rational` (which is `#![no_std]`-compatible), this crate **requires `std`**. This is because it depends on the [`regex`](https://crates.io/crates/regex) crate for parsing, which needs the standard library.
+Unlike `num_rational` (which is `#![no_std]`-compatible), this crate **requires `std`**. The parser builds on [`winnow`](https://crates.io/crates/winnow) and uses `String` and `std::str::FromStr`, which need the standard library.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## License
 

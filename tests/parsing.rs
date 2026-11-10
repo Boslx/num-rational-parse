@@ -2,17 +2,14 @@ use num_rational::{Ratio, Rational32, Rational64};
 use num_rational_parse::{RatioErrorKind, RationalParse};
 
 fn components(s: &str) -> (i32, i32) {
-    let r = Rational32::from_str_flex(s).unwrap_or_else(|_| panic!("Failed to parse {}", s));
+    let r = Rational32::from_str_flex(s).unwrap_or_else(|_| panic!("Failed to parse {s}"));
     (*r.numer(), *r.denom())
 }
 
 fn check_invalid(s: &str, expected: RatioErrorKind) {
     let res = Rational32::from_str_flex(s);
     match res {
-        Ok(val) => panic!(
-            "Expected error {:?} for input {:?}, but got Ok({:?})",
-            expected, s, val
-        ),
+        Ok(val) => panic!("Expected error {expected:?} for input {s:?}, but got Ok({val:?})"),
         Err(e) => assert_eq!(
             e.kind, expected,
             "For input {:?}, expected error {:?}, got {:?}",
@@ -39,7 +36,7 @@ fn test_examples() {
     assert_eq!((5, 4), components("1.25"));
     assert_eq!((1, 2), components(".5"));
     assert_eq!((3, 2500), components("1.2e-3"));
-    assert_eq!((100000, 1), components("1E5"));
+    assert_eq!((100_000, 1), components("1E5"));
     assert_eq!((1, 2), components("1_000/2_000"));
     assert_eq!((157, 50), components("3.14"));
     assert_eq!((3, 250), components("1.2e-2"));
@@ -79,7 +76,7 @@ fn test_decimals() {
 #[test]
 fn test_scientific() {
     assert_eq!((1, 3125), components("32.e-5"));
-    assert_eq!((1000000, 1), components("1E+06"));
+    assert_eq!((1_000_000, 1), components("1E+06"));
     assert_eq!((-12300, 1), components("-1.23e4"));
     assert_eq!((0, 1), components(" .0e+0\t"));
     assert_eq!((0, 1), components("-0.000e0"));
@@ -94,6 +91,9 @@ fn test_underscores() {
 
 #[test]
 fn test_overflow() {
+    type R8 = Ratio<i8>;
+    type R128 = Ratio<i128>;
+
     // Integer overflow: exceeds i32::MAX (2147483647)
     check_invalid("2147483648", RatioErrorKind::Overflow);
     check_invalid("99999999999", RatioErrorKind::Overflow);
@@ -113,7 +113,6 @@ fn test_overflow() {
     // Creative trailing-zero formatting that would overflow without stripping.
     // Using i8 (Rational8) since it overflows at scale 10^3 (1000 > 127).
     // Each of these has enough zeros that the un-stripped scale would overflow.
-    type R8 = Ratio<i8>;
     assert_eq!(R8::from_str_flex("1.0_0_0").unwrap(), R8::new(1, 1));
     assert_eq!(R8::from_str_flex("1.000_000").unwrap(), R8::new(1, 1));
     assert_eq!(R8::from_str_flex("-1.0_000_000").unwrap(), R8::new(-1, 1));
@@ -139,9 +138,19 @@ fn test_overflow() {
     check_invalid("1e10", RatioErrorKind::Overflow);
     check_invalid("2147483648e0", RatioErrorKind::Overflow);
 
+    // Exponent itself does not fit in i32: still an overflow, not a parse error
+    check_invalid("1e9999999999", RatioErrorKind::Overflow);
+    check_invalid("1e-9999999999", RatioErrorKind::Overflow);
+
     // Scientific notation overflow: negative exponent causing denominator overflow
     check_invalid("3.14_15e-1_0", RatioErrorKind::Overflow);
     check_invalid("1e-10", RatioErrorKind::Overflow);
+
+    // Zero stays zero whatever the exponent, even when 10^|exp| would overflow
+    assert_eq!(components("0.0e10"), (0, 1));
+    assert_eq!(components("0e-40"), (0, 1));
+    assert_eq!(components("-0.0e-10"), (0, 1));
+    assert_eq!(components("0.000e-9999999999"), (0, 1));
 
     // --- MIN / MAX boundary tests for various integer widths ---
 
@@ -175,7 +184,6 @@ fn test_overflow() {
     );
 
     // i128::MAX and i128::MIN
-    type R128 = Ratio<i128>;
     assert_eq!(
         R128::from_str_flex(&i128::MAX.to_string()).unwrap(),
         R128::new(i128::MAX, 1)
@@ -191,6 +199,20 @@ fn test_overflow() {
     assert_eq!(
         R128::from_str_flex(&format!("{}/1", i128::MIN)).unwrap(),
         R128::new(i128::MIN, 1)
+    );
+}
+
+#[test]
+fn test_unsigned_negative_zero() {
+    // "-0" is still zero, so unsigned types accept it.
+    assert_eq!(Ratio::<u32>::from_str_flex("-0").unwrap(), Ratio::new(0, 1));
+    assert_eq!(
+        Ratio::<u32>::from_str_flex("-0.0").unwrap(),
+        Ratio::new(0, 1)
+    );
+    assert_eq!(
+        Ratio::<u32>::from_str_flex("-0_0").unwrap(),
+        Ratio::new(0, 1)
     );
 }
 
@@ -278,17 +300,18 @@ fn test_backtracking() {
 
 #[test]
 fn test_aliases() {
+    type RationalIsize = Ratio<isize>;
+    type Rational8 = Ratio<i8>;
+
     // Test Rational64 (i64)
     let r64 = Rational64::from_str_flex("3.1415926535").unwrap();
-    assert_eq!(r64, Rational64::new(6283185307, 2000000000));
+    assert_eq!(r64, Rational64::new(6_283_185_307, 2_000_000_000));
 
     // Test Ratio<isize>
-    type RationalIsize = Ratio<isize>;
     let risize = RationalIsize::from_str_flex("1/3").unwrap();
     assert_eq!(risize, RationalIsize::new(1, 3));
 
     // Test Ratio<i8>
-    type Rational8 = Ratio<i8>;
     assert_eq!(
         Rational8::from_str_flex("127").unwrap(),
         Rational8::new(127, 1)
